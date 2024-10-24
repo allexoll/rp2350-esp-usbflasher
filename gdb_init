@@ -1,0 +1,15 @@
+set history save on
+set confirm off
+set remotetimeout 240
+target extended-remote :3333
+set print asm-demangle on
+
+#monitor reset halt
+load
+
+#monitor rtt setup 0x20000000 262144 0
+#monitor rtt start
+#monitor rtt server start 15000 0
+run
+
+#quit
