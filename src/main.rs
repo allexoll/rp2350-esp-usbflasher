@@ -13,6 +13,8 @@
 #![no_main]
 
 use embedded_hal::digital::{OutputPin, PinState, StatefulOutputPin};
+use embedded_io::{ReadReady, WriteReady};
+use heapless::spsc::Queue;
 // Ensure we halt the program on panic (if we don't mention this crate it won't
 // be linked)
 use panic_halt as _;
@@ -119,25 +121,10 @@ fn main() -> ! {
     let mut esp32_boot_pin = pins.gpio14.into_push_pull_output_in_state(PinState::High);
     let mut esp32_reset_n = pins.gpio15.into_push_pull_output_in_state(PinState::High);
     let mut line: LineCoding = serial.line_coding().into();
+    let mut rx_buffer: Queue<u8, 4096>  = Queue::new();
+    let mut tx_buffer: Queue<u8, 4096>  = Queue::new();
     loop {
-        // poll read
-        let mut buf = [0u8; 8];
-        match uart_esp.read_raw(&mut buf) {
-            Err(_e) => {
-                // Do nothing
-            }
-            Ok(0) => {
-                // Do nothing
-            }
-            Ok(count) => {
-                let _ = serial.write(&buf[..count]);
-                let _ = serial.flush();
-            }
-        }
-        if !usb_dev.poll(&mut [&mut serial]) {
-            continue;
-        }
-        led.toggle().unwrap();
+        usb_dev.poll(&mut [&mut serial]);
         match (serial.dtr(), serial.rts()) {
             (false, true) => {
                 esp32_reset_n.set_low().unwrap();
@@ -153,7 +140,7 @@ fn main() -> ! {
             }
         }
 
-        // // Check for new data
+        // Check for new data
         let new_line: LineCoding = serial.line_coding().into();
         if new_line != line {
             line = new_line;
@@ -165,16 +152,55 @@ fn main() -> ! {
                 )
                 .unwrap();
         }
+
+
+        if uart_esp.uart_is_readable() {
+            let mut buf = [0u8; 64];
+            match uart_esp.read_raw(&mut buf) {
+                Err(_e) => {
+                    // Do nothing
+                }
+                Ok(0) => {
+                    // Do nothing
+                }
+                Ok(count) => {
+                    for i in 0..count {
+                        rx_buffer.enqueue(buf[i]).unwrap();
+                    }
+                    led.toggle().unwrap();
+                }
+            }
+        }
+        if !rx_buffer.is_empty() {
+            if serial.write_ready().unwrap(){
+                let byte = rx_buffer.dequeue().unwrap();
+                serial.write(&[byte]).unwrap();
+            }
+            let _ = serial.flush();
+        }
+        if serial.read_ready().unwrap() {
         let mut buf = [0u8; 64];
-        match serial.read(&mut buf) {
-            Err(_e) => {
-                // Do nothing
+            match serial.read(&mut buf) {
+                Err(_e) => {
+                    // Do nothing
+                }
+                Ok(count) => {
+                    for i in 0..count {
+                        tx_buffer.enqueue(buf[i]).unwrap();
+                    }
+                }
             }
-            Ok(0) => {
-                // Do nothing
-            }
-            Ok(count) => {
-                uart_esp.write_full_blocking(&buf[..count]);
+        }
+        if !tx_buffer.is_empty() {
+            while uart_esp.uart_is_writable() {
+                match tx_buffer.dequeue() {
+                    Some(byte) => {
+                        uart_esp.write_raw(&[byte]).unwrap();
+                    }
+                    None => {
+                        break;
+                    }
+                }
             }
         }
     }
@@ -189,6 +215,7 @@ impl From<&usbd_serial::LineCoding> for LineCoding {
     fn from(line_coding: &usbd_serial::LineCoding) -> Self {
         Self {
             data_rate: line_coding.data_rate(),
+            
         }
     }
 }
